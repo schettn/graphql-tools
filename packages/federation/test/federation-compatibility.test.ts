@@ -25,6 +25,7 @@ import {
   mapSchema,
 } from '@graphql-tools/utils';
 import { getStitchedSchemaFromSupergraphSdl } from '../src/supergraph';
+import { getSubgraphNamesFromSupergraphSdl } from './utils';
 
 describe('Federation Compatibility', () => {
   if (versionInfo.major < 16) {
@@ -48,6 +49,8 @@ describe('Federation Compatibility', () => {
       let apolloExecutor: Executor;
       let apolloSubgraphCalls: Record<string, number> = {};
       let stitchingSubgraphCalls: Record<string, number> = {};
+      let totalApolloSubgraphCalls = 0;
+      let totalStitchingSubgraphCalls = 0;
       let apolloGW: ApolloGateway;
       beforeAll(async () => {
         stitchedSchema = getStitchedSchemaFromSupergraphSdl({
@@ -56,8 +59,10 @@ describe('Federation Compatibility', () => {
           onExecutor({ subgraphName, endpoint }) {
             const actualExecutor = buildHTTPExecutor({ endpoint });
             return function tracedExecutor(execReq) {
-              stitchingSubgraphCalls[subgraphName.toLowerCase()] =
-                (stitchingSubgraphCalls[subgraphName] || 0) + 1;
+              const normalizedSubgraphName = subgraphName.toUpperCase();
+              stitchingSubgraphCalls[normalizedSubgraphName] =
+                (stitchingSubgraphCalls[normalizedSubgraphName] || 0) + 1;
+              totalStitchingSubgraphCalls++;
               return actualExecutor(execReq);
             };
           },
@@ -70,8 +75,10 @@ describe('Federation Compatibility', () => {
             const actualService = new RemoteGraphQLDataSource({ url });
             return {
               process(options) {
-                apolloSubgraphCalls[subgraphName.toLowerCase()] =
-                  (apolloSubgraphCalls[subgraphName.toLowerCase()] || 0) + 1;
+                const normalizedSubgraphName = subgraphName.toUpperCase();
+                apolloSubgraphCalls[normalizedSubgraphName] =
+                  (apolloSubgraphCalls[normalizedSubgraphName] || 0) + 1;
+                totalApolloSubgraphCalls++;
                 return actualService.process(options);
               },
             };
@@ -160,10 +167,12 @@ describe('Federation Compatibility', () => {
       tests.forEach((test, i) => {
         describe(`test-query-${i}`, () => {
           let result: ExecutionResult;
+          const document = parse(test.query, { noLocation: true });
           beforeAll(async () => {
             apolloSubgraphCalls = {};
             stitchingSubgraphCalls = {};
-            const document = parse(test.query, { noLocation: true });
+            totalApolloSubgraphCalls = 0;
+            totalStitchingSubgraphCalls = 0;
             const validationErrors = validate(stitchedSchema, document);
             if (validationErrors.length > 0) {
               result = { errors: validationErrors };
@@ -204,20 +213,33 @@ describe('Federation Compatibility', () => {
             }
           });
           if (!process.env['LEAK_TEST']) {
-            it('calls the subgraphs at the same number or less than Apollo GW', async () => {
-              try {
-                await apolloExecutor({
-                  document: parse(test.query, { noLocation: true }),
-                });
-              } catch (e) {}
-              for (const subgraphName in apolloSubgraphCalls) {
-                if (stitchingSubgraphCalls[subgraphName] != null) {
-                  expect(stitchingSubgraphCalls[subgraphName]).toBeLessThanOrEqual(
-                    apolloSubgraphCalls[subgraphName],
-                  );
+            describe('does not do extra subgraph calls', () => {
+              beforeAll(async () => {
+                try {
+                  await apolloExecutor({
+                    document,
+                  });
+                } catch (e) {}
+              });
+              const subgraphNames = getSubgraphNamesFromSupergraphSdl(supergraphSdl);
+              it('subgraphs', () => {
+                if (totalStitchingSubgraphCalls > totalApolloSubgraphCalls) {
+                  for (const subgraphName of subgraphNames) {
+                    if (
+                      (stitchingSubgraphCalls[subgraphName] || 0) >
+                      (apolloSubgraphCalls[subgraphName] || 0)
+                    ) {
+                      throw new Error(
+                        `Stitching does extra call(s) for ${subgraphName}
+                         Stitching -> ${stitchingSubgraphCalls[subgraphName]}
+                         Apollo -> ${apolloSubgraphCalls[subgraphName] || 0}`,
+                      );
+                    }
+                  }
+                } else {
+                  expect(totalStitchingSubgraphCalls).toBeLessThanOrEqual(totalApolloSubgraphCalls);
                 }
-                // If never called, that's better
-              }
+              });
             });
           }
         });
