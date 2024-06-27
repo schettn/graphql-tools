@@ -105,9 +105,8 @@ export function delegateRequest<
 
   function handleExecutorResult(executorResult: MaybeAsyncIterable<ExecutionResult<any>>) {
     if (isAsyncIterable(executorResult)) {
-      const iterator = executorResult[Symbol.asyncIterator]();
       // "subscribe" to the subscription result and map the result through the transforms
-      return mapAsyncIterator(iterator, result => transformer.transformResult(result));
+      return mapAsyncIterator(executorResult, result => transformer.transformResult(result));
     }
     return transformer.transformResult(executorResult);
   }

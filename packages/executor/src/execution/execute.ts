@@ -1611,12 +1611,19 @@ function mapSourceToResponse(
   // "ExecuteQuery" algorithm, for which `execute` is also used.
   return flattenAsyncIterable(
     mapAsyncIterator(
-      resultOrStream[Symbol.asyncIterator](),
-      async (payload: unknown) =>
-        ensureAsyncIterable(await executeImpl(buildPerEventExecutionContext(exeContext, payload))),
-      (error: Error) => {
-        const wrappedError = createGraphQLError(error.message, {
-          originalError: error,
+      resultOrStream,
+      payload => {
+        const execContext = buildPerEventExecutionContext(exeContext, payload);
+        const res$ = executeImpl(execContext);
+        if (isPromise(res$)) {
+          return res$.then(ensureAsyncIterable);
+        }
+        return ensureAsyncIterable(res$);
+      },
+      error => {
+        const coercedError = coerceError(error);
+        const wrappedError = createGraphQLError(coercedError.message, {
+          originalError: coercedError,
           nodes: [exeContext.operation],
         });
         throw wrappedError;

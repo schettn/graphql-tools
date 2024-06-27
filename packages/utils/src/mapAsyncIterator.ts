@@ -1,4 +1,5 @@
 import type { MaybePromise } from './executor.js';
+import { isAsyncIterable } from './isAsyncIterable.js';
 import { isPromise } from './jsutils.js';
 
 /**
@@ -6,59 +7,86 @@ import { isPromise } from './jsutils.js';
  * which produces values mapped via calling the callback function.
  */
 export function mapAsyncIterator<T, U>(
-  iterator: AsyncIterator<T>,
+  iteratorOrIterable: AsyncIterable<T> | AsyncIterator<T>,
   onNext: (value: T) => MaybePromise<U>,
-  onError?: any,
+  onError?: (error: unknown) => unknown,
   onEnd?: () => MaybePromise<void>,
 ): AsyncIterableIterator<U> {
-  let $return: () => Promise<IteratorResult<T>>;
-  let abruptClose: (error: any) => Promise<never>;
-  let onEndWithValue: <R>(value: R) => MaybePromise<R>;
+  let _mappedIterator: AsyncIterator<U>;
 
-  if (onEnd) {
-    onEndWithValue = value => {
-      const onEnd$ = onEnd();
-      return isPromise(onEnd$) ? onEnd$.then(() => value) : value;
-    };
-  }
+  function getMappedIterator() {
+    if (_mappedIterator == null) {
+      let _iterator: AsyncIterator<T>;
+      let abruptClose: (error: unknown) => Promise<never>;
+      function getIterator() {
+        if (!_iterator) {
+          _iterator = isAsyncIterable(iteratorOrIterable)
+            ? iteratorOrIterable[Symbol.asyncIterator]()
+            : iteratorOrIterable;
+          if (typeof _iterator.return === 'function') {
+            const $return = _iterator.return;
+            abruptClose = (error: any) => {
+              const rethrow = () => Promise.reject(error);
+              return $return.call(_iterator).then(rethrow, rethrow);
+            };
+          }
+        }
+        return _iterator;
+      }
+      let onEndWithValue: <R>(value: R) => MaybePromise<R>;
 
-  if (typeof iterator.return === 'function') {
-    $return = iterator.return;
-    abruptClose = (error: any) => {
-      const rethrow = () => Promise.reject(error);
-      return $return.call(iterator).then(rethrow, rethrow);
-    };
-  }
+      if (onEnd) {
+        onEndWithValue = value => {
+          const onEnd$ = onEnd();
+          return isPromise(onEnd$) ? onEnd$.then(() => value) : value;
+        };
+      }
 
-  function mapResult(result: any) {
-    if (result.done) {
-      return onEndWithValue ? onEndWithValue(result) : result;
+      function mapResult(result: any) {
+        if (result.done) {
+          return onEndWithValue ? onEndWithValue(result) : result;
+        }
+        return asyncMapValue(result.value, onNext).then(iteratorResult, abruptClose);
+      }
+
+      let mapReject: (error: unknown) => Promise<unknown>;
+      if (onError) {
+        // Capture rejectCallback to ensure it cannot be null.
+        const reject = onError;
+        mapReject = error => asyncMapValue(error, reject).then(iteratorResult, abruptClose);
+      }
+      _mappedIterator = {
+        next(value) {
+          return getIterator().next(value).then(mapResult, mapReject);
+        },
+        return(value) {
+          const iterator = getIterator();
+          const res$ = iterator.return
+            ? iterator.return(value).then(mapResult, mapReject)
+            : Promise.resolve({ value: undefined, done: true });
+          return onEndWithValue ? res$.then(onEndWithValue) : res$;
+        },
+        throw(error) {
+          const iterator = getIterator();
+          if (typeof iterator.throw === 'function') {
+            return iterator.throw(error).then(mapResult, mapReject);
+          }
+          return Promise.reject(error).catch(abruptClose);
+        },
+      };
     }
-    return asyncMapValue(result.value, onNext).then(iteratorResult, abruptClose);
-  }
-
-  let mapReject: any;
-  if (onError) {
-    // Capture rejectCallback to ensure it cannot be null.
-    const reject = onError;
-    mapReject = (error: any) => asyncMapValue(error, reject).then(iteratorResult, abruptClose);
+    return _mappedIterator;
   }
 
   return {
-    next() {
-      return iterator.next().then(mapResult, mapReject);
+    get next() {
+      return getMappedIterator().next;
     },
-    return() {
-      const res$ = $return
-        ? $return.call(iterator).then(mapResult, mapReject)
-        : Promise.resolve({ value: undefined, done: true });
-      return onEndWithValue ? res$.then(onEndWithValue) : res$;
+    get return() {
+      return getMappedIterator().return;
     },
-    throw(error: any) {
-      if (typeof iterator.throw === 'function') {
-        return iterator.throw(error).then(mapResult, mapReject);
-      }
-      return Promise.reject(error).catch(abruptClose);
+    get throw() {
+      return getMappedIterator().throw;
     },
     [Symbol.asyncIterator]() {
       return this;
